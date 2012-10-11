@@ -1,0 +1,18 @@
+twitter:
+  credentials:
+    # go to [dev.twitter.com](http://dev.twitter.com), 
+    # sign up with your account and create a new app 
+    # (the details can be bogus, your app will be private)
+    # copy the consumer key and secret from your app 
+    :consumer_key: yourownconsumerkey
+    :consumer_secret: yourownconsumersecret 
+    # go to "my access token" in the (righthand) menu of your app 
+    # and copy the token and key in the configuration file
+    :oauth_token: yourownoauthtoken
+    :oauth_token_secret: yourowntokensecret
+  # path to a directory where each tweet will be backuped
+  storage_path: ./archive 
+  # number of seconds, each tweet older than that
+  # will be deleted (up to the 3200th)
+  expiration_time: 172800
+
