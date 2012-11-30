@@ -13,38 +13,79 @@ module OnlineMemory
   module Twitter
     
     def self.erase_old_tweets(client, expiration=0, storage=nil)
-      storage = Storage.new( storage ) if storage and not storage.respond_to? :store
-      client = RateLimitedClient.new( client ) unless client.respond_to? :verify_credentials
-      timeline = Timeline.new( client )
-      expiration = DateTime.now - expiration.seconds unless expiration.respond_to? :acts_like_date? and expiration.acts_like_date?
-      processed = 0
-      begin
-        $stdout.write "Backup and delete "
-        timeline.each_older_than(expiration) do |tweet|
-          storage.store( tweet ) if storage
-          client.tweet_destroy( tweet.attrs[:id] ) 
-          $stdout.write "."
-        end
-      rescue ::Twitter::Error::TooManyRequests => error
-        $stderr.write "(too many requests)"
-        return false
-      ensure
-        $stdout.write " " + processed.to_s + " tweets" 
-      end
-      return true
+      eraser = OldTweetsEraser.new
+      eraser.client = client
+      eraser.storage = storage
+      return eraser.erase_older_than(expiration)
     end
 
     def self.backup_new_tweets(client, storage)
       raise "TODO"
     end
 
+    class OldTweetsEraser
+      attr_reader :client
+      attr_reader :storage
+      attr_writer :timeline
+      attr_accessor :ignore_missing
+      attr_accessor :wait_if_overloaded
+
+      def initialize
+        @ignore_missing = true
+        @wait_if_overloaded = false
+      end
+
+      def storage=(val)
+        if val.respond_to? :store
+          @storage = val
+        else
+          @storage = Storage.new( val )
+        end
+      end
+
+      def timeline
+        @timeline ||= Timeline.new( client )
+      end
+
+      def client=(val)
+        if val.respond_to? :verify_credentials
+          @client = val
+        else
+          @client = RateLimitedClient.new( client )
+        end
+      end
+
+      def erase_older_than(expiration)
+        expiration = DateTime.now - expiration.seconds unless expiration.respond_to? :acts_like_date? and expiration.acts_like_date?
+        processed = 0
+        $stdout.write (storage ? "Backup and delete " : "Delete ")
+        begin
+          timeline.each_older_than(expiration) do |tweet|
+            storage.store( tweet ) if storage
+            client.tweet_destroy( tweet.attrs[:id] ) 
+            $stdout.write "."
+            processed += 1
+          end
+        ensure
+          $stdout.write " \nProcessed " + processed.to_s + " tweet(s)\n" 
+        end
+        return true
+      end
+
+    end
+
+
     class RateLimitedClient 
 
       attr_accessor :max_retries
+      attr_accessor :wait_if_overloaded
+      attr_accessor :wait_if_clienterror
 
       def initialize(*options)
         @client = Client.new(*options)
         @max_retries = 5
+        @wait_if_overloaded = 250
+        @wait_if_clienterror = 250
       end
 
       def method_missing(m, *args, &block)
@@ -57,23 +98,80 @@ module OnlineMemory
 
     private 
 
+      def manageable_error?(error)
+        case error
+        when ::Twitter::Error::TooManyRequests
+          { 
+            cause: "too many requests" , 
+            wait: error.rate_limit.reset_in + 15 
+          }
+        when ::Twitter::Error::ServiceUnavailable
+          { 
+            cause: "twitter overloaded" , 
+            wait: @wait_if_overloaded 
+          }
+        when ::Twitter::Error::ClientError
+          if error.to_s.match(/Connection reset by peer/)
+            { 
+              cause: "connection reset by peer" , 
+              wait: @wait_if_clienterror ,
+              exec: Proc.new { self.reset_connection! }
+            }
+          elsif error.to_s.match(/Timeout::Error/)
+            {
+              cause: "twitter timeout",
+              wait: @wait_if_clienterror ,
+              exec: Proc.new { self.reset_connection! }
+            }
+          else
+            false
+          end
+        when ::Timeout::Error
+        else
+          false
+        end  
+      end
+
       def rate_limit(method, *params, &block)
         tries = 0
         begin
           tries += 1
           result = @client.__send__(method,*params, &block)
-        rescue ::Twitter::Error::TooManyRequests => error
-          $stderr.write "(too many requests #{tries})"
-          if tries <= @max_retries
-            $stderr.write "(sleeping #{error.rate_limit.reset_in})"
-            sleep error.rate_limit.reset_in
-            retry
-          else
+        rescue => error
+          data = manageable_error?(error)
+          raise unless data
+          if tries > @max_retries or not data[:wait] or data[:wait] == 0
+            $stderr.write "(#{data[:cause]})\n"
             raise
+          else
+            $stderr.write "(#{data[:cause]}, try #{tries}, sleeping #{data[:wait]})"
+            sleep (data[:wait])
+            data[:exec].call if data[:exec]
+            retry
           end
         end
         result
       end
+
+    end
+
+    class TweetArchiveFile
+
+      attr_accessor :file
+      def initialize(file)
+        @file = file
+      end
+
+      def each_tweet_id
+        io = File.open(@file)
+        io.each_line do |line|
+          if /^status_id: (\d+)/.match(line)
+            yield $1
+          end
+        end
+      end
+
+      alias_method :each, :each_tweet_id
 
     end
 
@@ -85,6 +183,11 @@ module OnlineMemory
         end
         @screen_name
       end
+
+      def reset_connection!
+        @connection = nil
+      end
+
     end
 
     class Storage
@@ -167,10 +270,55 @@ module OnlineMemory
         options[:include_rts] = true
         options[:include_entities] = true
         options[:max_id] = @next_tweet - 1 if @next_tweet
-        tweets = @twitter.user_timeline(@screen_name, options) || [ ]
+        tweets = real_fetch_in_timeline(options)
+        tweets ||= [ ]
         @end_of_tweets = true if tweets.count == 0
         @next_tweet = tweets.last.attrs[:id] if tweets.count > 0
         tweets
+      end
+
+      def real_fetch_in_timeline(options)
+        @twitter.user_timeline(@screen_name, options)
+      end
+
+    end
+
+    class FakeTimeline < Timeline
+
+      attr_reader :tweet_ids
+      attr_accessor :ignore_missing
+
+      def initialize(tweet_ids, *params)
+        super(*params)
+        self.tweet_ids = tweet_ids
+        self.ignore_missing = true
+      end
+
+      def tweet_ids=(val)
+        @enum = nil
+        @tweet_ids = val
+      end
+
+      def tweet_ids_enum
+        @enum ||= @tweet_ids.to_enum(:each_tweet_id)
+      end
+
+    private
+
+      def real_fetch_in_timeline(options)
+        begin
+          begin
+            tweet_id = tweet_ids_enum.next
+          rescue StopIteration => e
+            return nil
+          end
+          tweets = [ @twitter.status(tweet_id, options) ]
+        rescue ::Twitter::Error::NotFound => error
+          raise unless @ignore_missing
+          $stderr.write "#"
+          retry
+        end
+        return tweets
       end
 
     end
