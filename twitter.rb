@@ -36,7 +36,7 @@ module OnlineMemory
       end
 
       def storage=(val)
-        if val.respond_to? :store
+        if val.respond_to? :store or storage.nil?
           @storage = val
         else
           @storage = Storage.new( val )
