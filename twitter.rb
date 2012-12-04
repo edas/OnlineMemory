@@ -36,7 +36,7 @@ module OnlineMemory
       end
 
       def storage=(val)
-        if val.respond_to? :store or storage.nil?
+        if val.respond_to? :store or val.nil?
           @storage = val
         else
           @storage = Storage.new( val )
@@ -51,7 +51,7 @@ module OnlineMemory
         if val.respond_to? :verify_credentials
           @client = val
         else
-          @client = RateLimitedClient.new( client )
+          @client = RateLimitedClient.new( val )
         end
       end
 
