@@ -4,8 +4,13 @@ load "./twitter.rb"
 
 cfg = YAML.load_file("settings.yml")["twitter"]
 
-OnlineMemory::Twitter.erase_old_tweets(
-  cfg['credentials'],
-  cfg['expiration_time'], 
-  cfg['storage_path']
-)
+
+
+eraser = OnlineMemory::Twitter::OldTweetsEraser.new
+eraser.client = cfg['credentials']
+
+# nil if you don't want backup
+eraser.storage = cfg['storage_path']
+
+
+eraser.erase_older_than(cfg['expiration_time'])
