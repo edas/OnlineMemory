@@ -158,15 +158,25 @@ module OnlineMemory
     class TweetArchiveFile
 
       attr_accessor :file
-      def initialize(file)
+      attr_accessor :last_id_processed
+
+      def initialize(file, last_id)
         @file = file
+        @last_id_processed = last_id
       end
 
       def each_tweet_id
+        to_reach = @last_id_processed
         io = File.open(@file)
         io.each_line do |line|
           if /^status_id: (\d+)/.match(line)
-            yield $1
+            id = $1
+            if to_reach
+              to_reach = false if id == to_reach
+              next
+            end
+            yield id
+            @last_id_processed = id
           end
         end
       end
@@ -287,11 +297,13 @@ module OnlineMemory
 
       attr_reader :tweet_ids
       attr_accessor :ignore_missing
+      attr_accessor :ignore_suspended
 
       def initialize(tweet_ids, *params)
         super(*params)
         self.tweet_ids = tweet_ids
         self.ignore_missing = true
+        self.ignore_suspended = true
       end
 
       def tweet_ids=(val)
@@ -316,6 +328,9 @@ module OnlineMemory
         rescue ::Twitter::Error::NotFound => error
           raise unless @ignore_missing
           $stderr.write "#"
+          retry
+        rescue ::Twitter::Error::Forbidden => error
+          raise unless ( /User has been suspended/.match(error.to_s) and @ignore_suspended )
           retry
         end
         return tweets

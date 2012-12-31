@@ -1,20 +1,30 @@
 require 'yaml'
 load "./twitter.rb"
 
+last_file = "backup-from-privacydata.last"
 
 cfg = YAML.load_file("settings.yml")["twitter"]
+last_id = nil
+begin
+ last_id = File.read(last_file)
+rescue
+  #nothing
+end
+
 
 eraser = OnlineMemory::Twitter::OldTweetsEraser.new
 eraser.client = client = OnlineMemory::Twitter::RateLimitedClient.new( cfg['credentials'] )
 screen_name = client.screen_name
 archive_file = "#{screen_name}/#{screen_name}-tweets.txt"
-tweets_archive = OnlineMemory::Twitter::TweetArchiveFile.new( archive_file )
+tweets_archive = OnlineMemory::Twitter::TweetArchiveFile.new( archive_file, last_id )
 eraser.timeline = OnlineMemory::Twitter::FakeTimeline.new( tweets_archive, client)
 eraser.storage = OnlineMemory::Twitter::Storage.new( cfg['storage_path'] )
 
-eraser.erase_older_than(cfg['expiration_time'])
-
-
+begin
+  eraser.erase_older_than(cfg['expiration_time'])
+ensure
+  File.write(last_file, tweets_archive.last_id_processed)
+end
 
 
 # $stdout.write "Backup and delete "
